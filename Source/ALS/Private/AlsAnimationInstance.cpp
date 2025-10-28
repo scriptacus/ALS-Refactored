@@ -12,6 +12,7 @@
 #include "Settings/AlsCharacterSettings.h"
 #include "Utility/AlsConstants.h"
 #include "Utility/AlsDebugUtility.h"
+#include "Utility/AlsGravityUtility.h"
 #include "Utility/AlsMacros.h"
 #include "Utility/AlsMontageUtility.h"
 #include "Utility/AlsPrivateMemberAccessor.h"
@@ -373,8 +374,27 @@ void UAlsAnimationInstance::RefreshView(const float DeltaTime)
 {
 	if (!LocomotionAction.IsValid())
 	{
-		ViewState.YawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw - LocomotionState.Rotation.Yaw));
-		ViewState.PitchAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(ViewState.Rotation.Pitch - LocomotionState.Rotation.Pitch));
+		// Calculate view angles relative to character rotation
+		// When gravity-aware mode is enabled, calculate in gravity space for correct behavior with custom gravity
+		if (UAlsGravityUtility::HasCustomGravity(Character))
+		{
+			// Transform both rotations to gravity space before calculating relative angles
+			const FQuat WorldToGravityTransform = UAlsGravityUtility::GetWorldToGravityTransform(Character);
+			const FQuat GravitySpaceViewRotation = WorldToGravityTransform * ViewState.Rotation.Quaternion();
+			const FQuat GravitySpaceCharacterRotation = WorldToGravityTransform * LocomotionState.RotationQuaternion;
+
+			const FRotator GravitySpaceViewRot = GravitySpaceViewRotation.Rotator();
+			const FRotator GravitySpaceCharacterRot = GravitySpaceCharacterRotation.Rotator();
+
+			ViewState.YawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(GravitySpaceViewRot.Yaw - GravitySpaceCharacterRot.Yaw));
+			ViewState.PitchAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(GravitySpaceViewRot.Pitch - GravitySpaceCharacterRot.Pitch));
+		}
+		else
+		{
+			// Standard calculation in world space
+			ViewState.YawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw - LocomotionState.Rotation.Yaw));
+			ViewState.PitchAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(ViewState.Rotation.Pitch - LocomotionState.Rotation.Pitch));
+		}
 
 		ViewState.PitchAmount = 0.5f - ViewState.PitchAngle / 180.0f;
 	}
@@ -545,8 +565,23 @@ void UAlsAnimationInstance::RefreshHead()
 
 		TargetPitchAngle = 0.0f;
 
+		// Get character rotation yaw in the appropriate coordinate space (must match InputYawAngle/TargetYawAngle)
+		float CharacterRotationYaw;
+		if (UAlsGravityUtility::HasCustomGravity(Character))
+		{
+			// Transform character rotation to gravity space to match InputYawAngle/TargetYawAngle coordinate space
+			const FQuat WorldToGravityTransform = UAlsGravityUtility::GetWorldToGravityTransform(Character);
+			const FQuat GravitySpaceRotation = WorldToGravityTransform * LocomotionState.RotationQuaternion;
+			CharacterRotationYaw = UE_REAL_TO_FLOAT(GravitySpaceRotation.Rotator().Yaw);
+		}
+		else
+		{
+			// Standard path: use world-space yaw
+			CharacterRotationYaw = UE_REAL_TO_FLOAT(LocomotionState.Rotation.Yaw);
+		}
+
 		TargetYawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(
-			(LocomotionState.bHasInput ? LocomotionState.InputYawAngle: LocomotionState.TargetYawAngle) - LocomotionState.Rotation.Yaw));
+			(LocomotionState.bHasInput ? LocomotionState.InputYawAngle: LocomotionState.TargetYawAngle) - CharacterRotationYaw));
 
 		static constexpr auto LocomotionYawSpeedThreshold{20.0f};
 
@@ -685,11 +720,13 @@ void UAlsAnimationInstance::RefreshLocomotionOnGameThread()
 	LocomotionState.TargetYawAngle = Locomotion.TargetYawAngle;
 
 	auto PreviousYawAngle{LocomotionState.Rotation.Yaw};
+	FQuat PreviousRotationQuaternion{LocomotionState.RotationQuaternion};
 
 	if (MovementBase.bHasRelativeRotation)
 	{
 		// Offset the angle to keep it relative to the movement base.
 		PreviousYawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(PreviousYawAngle + MovementBase.DeltaRotation.Yaw));
+		PreviousRotationQuaternion = MovementBase.DeltaRotation.Quaternion() * PreviousRotationQuaternion;
 	}
 
 	const auto& Proxy{GetProxyOnGameThread<FAnimInstanceProxy>()};
@@ -733,10 +770,32 @@ void UAlsAnimationInstance::RefreshLocomotionOnGameThread()
 		LocomotionState.RotationQuaternion = SmoothTransform.GetRotation();
 	}
 
-	LocomotionState.YawVelocity = bCanCalculateRateOfChange
-		                              ? FMath::UnwindDegrees(UE_REAL_TO_FLOAT(
-			                                LocomotionState.Rotation.Yaw - PreviousYawAngle)) / ActorDeltaTime
-		                              : 0.0f;
+	// Calculate yaw velocity in the appropriate coordinate space
+	if (bCanCalculateRateOfChange)
+	{
+		if (UAlsGravityUtility::HasCustomGravity(Character))
+		{
+			// Transform both previous and current rotation to gravity space before calculating yaw velocity
+			const FQuat WorldToGravityTransform = UAlsGravityUtility::GetWorldToGravityTransform(Character);
+			const FQuat GravitySpacePreviousRotation = WorldToGravityTransform * PreviousRotationQuaternion;
+			const FQuat GravitySpaceCurrentRotation = WorldToGravityTransform * LocomotionState.RotationQuaternion;
+
+			const float PreviousGravityYaw = UE_REAL_TO_FLOAT(GravitySpacePreviousRotation.Rotator().Yaw);
+			const float CurrentGravityYaw = UE_REAL_TO_FLOAT(GravitySpaceCurrentRotation.Rotator().Yaw);
+
+			LocomotionState.YawVelocity = FMath::UnwindDegrees(CurrentGravityYaw - PreviousGravityYaw) / ActorDeltaTime;
+		}
+		else
+		{
+			// Standard calculation in world space
+			LocomotionState.YawVelocity = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(
+				LocomotionState.Rotation.Yaw - PreviousYawAngle)) / ActorDeltaTime;
+		}
+	}
+	else
+	{
+		LocomotionState.YawVelocity = 0.0f;
+	}
 
 	LocomotionState.Scale = UE_REAL_TO_FLOAT(Proxy.GetComponentTransform().GetScale3D().Z);
 
@@ -780,7 +839,16 @@ void UAlsAnimationInstance::RefreshGrounded()
 
 FVector3f UAlsAnimationInstance::GetRelativeVelocity() const
 {
-	return FVector3f{LocomotionState.RotationQuaternion.UnrotateVector(LocomotionState.Velocity)};
+	// Get velocity relative to character rotation
+	// Since the character is already oriented to gravity (via gravity-aware rotation in AlsCharacter),
+	// character-relative space already has the correct orientation where:
+	// - X = forward/backward along gravity surface
+	// - Y = left/right along gravity surface
+	// - Z = up/down perpendicular to gravity surface
+	// Therefore, we don't need to transform again.
+	FVector3f RelativeVelocity{LocomotionState.RotationQuaternion.UnrotateVector(LocomotionState.Velocity)};
+
+	return RelativeVelocity;
 }
 
 FVector2f UAlsAnimationInstance::GetRelativeAccelerationAmount() const
@@ -800,7 +868,10 @@ FVector2f UAlsAnimationInstance::GetRelativeAccelerationAmount() const
 		return FVector2f::ZeroVector;
 	}
 
-	const FVector3f RelativeAcceleration{LocomotionState.RotationQuaternion.UnrotateVector(LocomotionState.Acceleration)};
+	// Get acceleration relative to character rotation
+	// Since the character is already oriented to gravity, character-relative space already has
+	// the correct axes aligned with the gravity surface
+	FVector3f RelativeAcceleration{LocomotionState.RotationQuaternion.UnrotateVector(LocomotionState.Acceleration)};
 
 	return FVector2f{UAlsVector::ClampMagnitude01(RelativeAcceleration / MaxAcceleration)};
 }
@@ -818,9 +889,15 @@ void UAlsAnimationInstance::RefreshVelocityBlend()
 
 	if (RelativeVelocityDirection.Normalize())
 	{
+		// When gravity-aware animation is enabled, GetRelativeVelocity() transforms to gravity space
+		// where Z is vertical (along gravity). For horizontal directional blending, we should only
+		// normalize using XY. Otherwise, use all 3 dimensions for backward compatibility.
+		const bool bInGravitySpace = UAlsGravityUtility::HasCustomGravity(Character);
+
 		TargetVelocityBlend =
 			RelativeVelocityDirection /
-			(FMath::Abs(RelativeVelocityDirection.X) + FMath::Abs(RelativeVelocityDirection.Y) + FMath::Abs(RelativeVelocityDirection.Z));
+			(FMath::Abs(RelativeVelocityDirection.X) + FMath::Abs(RelativeVelocityDirection.Y) +
+			 (bInGravitySpace ? 0.0f : FMath::Abs(RelativeVelocityDirection.Z)));
 	}
 
 	if (VelocityBlend.bInitializationRequired || Settings->Grounded.VelocityBlendInterpolationHalfLife <= 0.0f)
@@ -897,9 +974,29 @@ void UAlsAnimationInstance::RefreshGroundedMovement()
 
 	GroundedState.HipsDirectionLockAmount = FMath::Clamp(GetCurveValue(UAlsConstants::HipsDirectionLockCurveName()), -1.0f, 1.0f);
 
-	const auto ViewRelativeVelocityYawAngle{
-		FMath::UnwindDegrees(UE_REAL_TO_FLOAT(LocomotionState.VelocityYawAngle - ViewState.Rotation.Yaw))
-	};
+	float ViewRelativeVelocityYawAngle;
+
+	// If gravity-aware animation state is enabled, calculate the yaw angle in gravity space
+	if (UAlsGravityUtility::HasCustomGravity(Character))
+	{
+		// Transform velocity to gravity space to get correct yaw angle
+		const FQuat WorldToGravityTransform = UAlsGravityUtility::GetWorldToGravityTransform(Character);
+		const FVector3f GravitySpaceVelocity = FVector3f{WorldToGravityTransform.RotateVector(FVector{LocomotionState.Velocity})};
+
+		// Calculate yaw angle from gravity-space velocity (where Z is up)
+		const float GravitySpaceVelocityYawAngle = UE_REAL_TO_FLOAT(FMath::RadiansToDegrees(FMath::Atan2(GravitySpaceVelocity.Y, GravitySpaceVelocity.X)));
+
+		// Transform view rotation to gravity space to get gravity-space view yaw
+		const FQuat GravitySpaceViewRotation = WorldToGravityTransform * ViewState.Rotation.Quaternion();
+		const float GravitySpaceViewYaw = UE_REAL_TO_FLOAT(GravitySpaceViewRotation.Rotator().Yaw);
+
+		ViewRelativeVelocityYawAngle = FMath::UnwindDegrees(GravitySpaceVelocityYawAngle - GravitySpaceViewYaw);
+	}
+	else
+	{
+		// Standard calculation using world-space yaw angles
+		ViewRelativeVelocityYawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(LocomotionState.VelocityYawAngle - ViewState.Rotation.Yaw));
+	}
 
 	RefreshMovementDirection(ViewRelativeVelocityYawAngle);
 	RefreshRotationYawOffsets(ViewRelativeVelocityYawAngle);
@@ -1495,9 +1592,24 @@ void UAlsAnimationInstance::PlayQuickStopAnimation()
 		return;
 	}
 
+	// Get character rotation yaw in the appropriate coordinate space (must match InputYawAngle/TargetYawAngle)
+	float CharacterRotationYaw;
+	if (UAlsGravityUtility::HasCustomGravity(Character))
+	{
+		// Transform character rotation to gravity space to match InputYawAngle/TargetYawAngle coordinate space
+		const FQuat WorldToGravityTransform = UAlsGravityUtility::GetWorldToGravityTransform(Character);
+		const FQuat GravitySpaceRotation = WorldToGravityTransform * LocomotionState.RotationQuaternion;
+		CharacterRotationYaw = UE_REAL_TO_FLOAT(GravitySpaceRotation.Rotator().Yaw);
+	}
+	else
+	{
+		// Standard path: use world-space yaw
+		CharacterRotationYaw = UE_REAL_TO_FLOAT(LocomotionState.Rotation.Yaw);
+	}
+
 	auto RemainingYawAngle{
 		FMath::UnwindDegrees(UE_REAL_TO_FLOAT(
-			(LocomotionState.bHasInput ? LocomotionState.InputYawAngle : LocomotionState.TargetYawAngle) - LocomotionState.Rotation.Yaw))
+			(LocomotionState.bHasInput ? LocomotionState.InputYawAngle : LocomotionState.TargetYawAngle) - CharacterRotationYaw))
 	};
 
 	RemainingYawAngle = UAlsRotation::RemapAngleForCounterClockwiseRotation(RemainingYawAngle);

@@ -5,6 +5,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Settings/AlsMantlingSettings.h"
+#include "Utility/AlsGravityUtility.h"
 #include "Utility/AlsMacros.h"
 #include "Utility/AlsMontageUtility.h"
 #include "Utility/AlsRotation.h"
@@ -111,6 +112,19 @@ void FAlsRootMotionSource_Mantling::PrepareRootMotion(const float SimulationDelt
 
 	const FTransform MeshTransform{Character.GetBaseRotationOffset()};
 	RootTransform = MeshTransform.GetRelativeTransformReverse(RootTransform);
+
+	if (UAlsGravityUtility::HasCustomGravity(&Character))
+	{
+		// Rotate the root transform to align with the character's gravity direction
+		// The animation assumes Z-up, but we need to rotate it to match the current gravity orientation
+		const FQuat GravityRotation = UAlsGravityUtility::GetGravityToWorldTransform(&Character);
+
+		// Apply gravity rotation to both the location and rotation components of the root transform
+		FVector RotatedLocation = GravityRotation.RotateVector(RootTransform.GetLocation());
+		FQuat RotatedRotation = GravityRotation * RootTransform.GetRotation();
+		RootTransform.SetLocation(RotatedLocation);
+		RootTransform.SetRotation(RotatedRotation);
+	}
 
 	// Apply the current root transform to the warped transform to get the target actor transform.
 

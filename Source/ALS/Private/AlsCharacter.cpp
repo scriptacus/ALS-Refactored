@@ -12,6 +12,7 @@
 #include "Net/Core/PushModel/PushModel.h"
 #include "Settings/AlsCharacterSettings.h"
 #include "Utility/AlsConstants.h"
+#include "Utility/AlsGravityUtility.h"
 #include "Utility/AlsMacros.h"
 #include "Utility/AlsRotation.h"
 #include "Utility/AlsUtility.h"
@@ -119,7 +120,7 @@ void AAlsCharacter::PostRegisterAllComponents()
 	ViewState.Rotation = ReplicatedViewRotation;
 	ViewState.PreviousYawAngle = UE_REAL_TO_FLOAT(ReplicatedViewRotation.Yaw);
 
-	const auto YawAngle{UE_REAL_TO_FLOAT(GetActorRotation().Yaw)};
+	const auto YawAngle{WorldRotationToGravityYaw(GetActorQuat())};
 
 	SetTargetYawAngle(YawAngle);
 
@@ -531,7 +532,7 @@ void AAlsCharacter::NotifyLocomotionModeChanged(const FGameplayTag& PreviousLoco
 
 			StartRolling(PlayRate, LocomotionState.bHasVelocity
 				                       ? LocomotionState.VelocityYawAngle
-				                       : UE_REAL_TO_FLOAT(FMath::UnwindDegrees(GetActorRotation().Yaw)));
+				                       : WorldRotationToGravityYaw(GetActorQuat()));
 		}
 		else
 		{
@@ -1133,7 +1134,7 @@ void AAlsCharacter::RefreshInput(const float DeltaTime)
 
 	if (LocomotionState.bHasInput)
 	{
-		LocomotionState.InputYawAngle = UE_REAL_TO_FLOAT(UAlsVector::DirectionToAngleXY(InputDirection));
+		LocomotionState.InputYawAngle = VectorToGravitySpaceYawAngle(InputDirection);
 	}
 }
 
@@ -1361,12 +1362,12 @@ void AAlsCharacter::RefreshLocomotionEarly()
 		LocomotionState.SmoothTargetYawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(
 			LocomotionState.SmoothTargetYawAngle + MovementBase.DeltaRotation.Yaw));
 
-		auto NewRotation{GetActorRotation()};
+		auto NewRotation{GetActorRotationGravitySpace()};
 		NewRotation.Pitch += MovementBase.DeltaRotation.Pitch;
 		NewRotation.Yaw += MovementBase.DeltaRotation.Yaw;
 		NewRotation.Normalize();
 
-		SetActorRotation(NewRotation);
+		SetActorRotationGravitySpace(NewRotation);
 	}
 
 	LocomotionState.bAimingLimitAppliedThisFrame = false;
@@ -1383,7 +1384,7 @@ void AAlsCharacter::RefreshLocomotion()
 	// character is moving, update the last velocity rotation. This value is saved because it might
 	// be useful to know the last orientation of a movement even after the character has stopped.
 
-	LocomotionState.Speed = UE_REAL_TO_FLOAT(LocomotionState.Velocity.Size2D());
+	LocomotionState.Speed = GetGravityAwareSpeed(LocomotionState.Velocity);
 
 	static constexpr auto HasSpeedThreshold{1.0f};
 
@@ -1391,7 +1392,7 @@ void AAlsCharacter::RefreshLocomotion()
 
 	if (LocomotionState.bHasVelocity)
 	{
-		LocomotionState.VelocityYawAngle = UE_REAL_TO_FLOAT(UAlsVector::DirectionToAngleXY(LocomotionState.Velocity));
+		LocomotionState.VelocityYawAngle = VectorToGravitySpaceYawAngle(LocomotionState.Velocity);
 	}
 
 	if (GetLocalRole() >= ROLE_AutonomousProxy)
@@ -1403,12 +1404,12 @@ void AAlsCharacter::RefreshLocomotion()
 		{
 			FVector DesiredVelocity;
 			if (AlsCharacterMovement->TryConsumePrePenetrationAdjustmentVelocity(DesiredVelocity) &&
-			    DesiredVelocity.Size2D() >= HasSpeedThreshold)
+			    GetGravityAwareSpeed(DesiredVelocity) >= HasSpeedThreshold)
 			{
 				bSendInitialVelocityYawAngle = !bHasDesiredVelocity;
 				bHasDesiredVelocity = true;
 
-				SetDesiredVelocityYawAngle(UE_REAL_TO_FLOAT(UAlsVector::DirectionToAngleXY(DesiredVelocity)));
+				SetDesiredVelocityYawAngle(VectorToGravitySpaceYawAngle(DesiredVelocity));
 			}
 			else
 			{
@@ -1514,6 +1515,80 @@ void AAlsCharacter::CharacterMovement_OnPhysicsRotation(const float DeltaTime)
 	RefreshRollingPhysics(DeltaTime);
 }
 
+FQuat AAlsCharacter::GetWorldToGravityTransform() const
+{
+	// Note: The functions on UCharacterMovementComponent have backwards names!
+	return UAlsGravityUtility::GetWorldToGravityTransform(this);
+}
+
+float AAlsCharacter::WorldRotationToGravityYaw(const FQuat& WorldRotation) const
+{
+	return UAlsGravityUtility::WorldRotationToGravityYaw(WorldRotation, this);
+}
+
+FQuat AAlsCharacter::GravityYawToWorldRotation(const float GravitySpaceYaw) const
+{
+	return UAlsGravityUtility::GravityYawToWorldRotation(GravitySpaceYaw, this);
+}
+
+FRotator AAlsCharacter::GetActorRotationGravitySpace() const
+{
+	return UAlsGravityUtility::WorldToGravityRotation(GetActorRotation(), this);
+}
+
+void AAlsCharacter::SetActorRotationGravitySpace(const FRotator& GravitySpaceRotation, const ETeleportType Teleport)
+{
+	SetActorRotation(UAlsGravityUtility::GravityToWorldRotation(GravitySpaceRotation, this), Teleport);
+}
+
+float AAlsCharacter::VectorToGravitySpaceYawAngle(const FVector& Direction) const
+{
+	if (!UAlsGravityUtility::HasCustomGravity(this))
+	{
+		// Standard calculation using world-space XY
+		return UE_REAL_TO_FLOAT(UAlsVector::DirectionToAngleXY(Direction));
+	}
+
+	// Transform direction to gravity space
+	const FQuat WorldToGravityTransform{GetWorldToGravityTransform()};
+	const FVector GravitySpaceDirection{WorldToGravityTransform.RotateVector(Direction)};
+
+	// Calculate yaw angle in gravity space (where Z is up)
+	return UE_REAL_TO_FLOAT(FMath::RadiansToDegrees(FMath::Atan2(GravitySpaceDirection.Y, GravitySpaceDirection.X)));
+}
+
+float AAlsCharacter::GetGravityAwareSpeed(const FVector& Velocity) const
+{
+	if (!UAlsGravityUtility::HasCustomGravity(this))
+	{
+		// Standard calculation using world-space XY
+		return UE_REAL_TO_FLOAT(Velocity.Size2D());
+	}
+
+	// Transform velocity to gravity space
+	const FQuat WorldToGravityTransform{GetWorldToGravityTransform()};
+	const FVector GravitySpaceVelocity{WorldToGravityTransform.RotateVector(Velocity)};
+
+	// Calculate 2D speed in gravity space (XY plane in gravity space)
+	return UE_REAL_TO_FLOAT(GravitySpaceVelocity.Size2D());
+}
+
+float AAlsCharacter::GetGravityAwareViewYaw(const FRotator& ViewRotation) const
+{
+	if (UAlsGravityUtility::HasCustomGravity(this))
+	{
+		// Transform view rotation to gravity space
+		const FQuat WorldToGravityTransform{GetWorldToGravityTransform()};
+		const FQuat GravitySpaceViewRotation{WorldToGravityTransform * ViewRotation.Quaternion()};
+		return UE_REAL_TO_FLOAT(GravitySpaceViewRotation.Rotator().Yaw);
+	}
+	else
+	{
+		// Standard path: use world-space yaw
+		return UE_REAL_TO_FLOAT(ViewRotation.Yaw);
+	}
+}
+
 void AAlsCharacter::RefreshGroundedRotation(const float DeltaTime)
 {
 	if (LocomotionAction.IsValid() || LocomotionMode != AlsLocomotionModeTags::Grounded)
@@ -1582,9 +1657,15 @@ void AAlsCharacter::RefreshGroundedRotation(const float DeltaTime)
 
 			// Rotate to the last view direction.
 
-			const auto TargetYawAngle{
-				LocomotionState.bHasInput ? UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw) : LocomotionState.TargetYawAngle
-			};
+			float TargetYawAngle;
+			if (LocomotionState.bHasInput)
+			{
+				TargetYawAngle = GetGravityAwareViewYaw(ViewState.Rotation);
+			}
+			else
+			{
+				TargetYawAngle = LocomotionState.TargetYawAngle;
+			}
 
 			const auto RotationInterpolationHalfLife{CalculateGroundedMovingRotationInterpolationHalfLife()};
 
@@ -1643,8 +1724,9 @@ void AAlsCharacter::RefreshGroundedRotation(const float DeltaTime)
 		}
 		else
 		{
-			TargetYawAngle = UE_REAL_TO_FLOAT(
-				ViewState.Rotation.Yaw + GetMesh()->GetAnimInstance()->GetCurveValue(UAlsConstants::RotationYawOffsetCurveName()));
+			// Get view yaw in the appropriate coordinate space
+			float ViewYaw = GetGravityAwareViewYaw(ViewState.Rotation);
+			TargetYawAngle = ViewYaw + GetMesh()->GetAnimInstance()->GetCurveValue(UAlsConstants::RotationYawOffsetCurveName());
 		}
 
 		const auto RotationInterpolationHalfLife{CalculateGroundedMovingRotationInterpolationHalfLife()};
@@ -1676,13 +1758,26 @@ bool AAlsCharacter::RefreshCustomGroundedNotMovingRotation(const float DeltaTime
 
 void AAlsCharacter::RefreshGroundedAimingRotation(const float DeltaTime)
 {
-	auto NewActorRotation{GetActorRotation()};
+	// For custom gravity: use WorldRotationToGravityYaw to get yaw in current gravity frame
+	// instead of GetActorRotationGravitySpace() which doesn't update correctly when gravity changes
+	FRotator NewActorRotation;
+	if (UAlsGravityUtility::HasCustomGravity(this))
+	{
+		NewActorRotation = FRotator(0.0f, WorldRotationToGravityYaw(GetActorQuat()), 0.0f);
+	}
+	else
+	{
+		NewActorRotation = GetActorRotation();
+	}
+
+	// Get view yaw in the appropriate coordinate space
+	float ViewYaw = GetGravityAwareViewYaw(ViewState.Rotation);
 
 	if (!LocomotionState.bHasInput && !LocomotionState.bMoving)
 	{
 		// Not moving.
 
-		SetTargetYawAngle(UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw));
+		SetTargetYawAngle(ViewYaw);
 
 		if (!ConstrainAimingRotation(NewActorRotation, DeltaTime, true))
 		{
@@ -1696,7 +1791,7 @@ void AAlsCharacter::RefreshGroundedAimingRotation(const float DeltaTime)
 		static constexpr auto RotationInterpolationHalfLife{0.1f};
 		static constexpr auto TargetYawAngleRotationSpeed{1000.0f};
 
-		SetTargetYawAngleSmooth(UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw), DeltaTime, TargetYawAngleRotationSpeed);
+		SetTargetYawAngleSmooth(ViewYaw, DeltaTime, TargetYawAngleRotationSpeed);
 
 		NewActorRotation.Yaw = UAlsRotation::DamperExactAngle(UE_REAL_TO_FLOAT(FMath::UnwindDegrees(NewActorRotation.Yaw)),
 		                                                      LocomotionState.SmoothTargetYawAngle,
@@ -1709,7 +1804,7 @@ void AAlsCharacter::RefreshGroundedAimingRotation(const float DeltaTime)
 		}
 	}
 
-	SetActorRotation(NewActorRotation);
+	SetActorRotationGravitySpace(NewActorRotation);
 }
 
 bool AAlsCharacter::ConstrainAimingRotation(FRotator& ActorRotation, const float DeltaTime, const bool bApplySecondaryConstraint)
@@ -1724,7 +1819,10 @@ bool AAlsCharacter::ConstrainAimingRotation(FRotator& ActorRotation, const float
 		LocomotionState.AimingYawAngleLimit = 180.0f;
 	}
 
-	auto ViewRelativeAngle{FMath::UnwindDegrees(UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw - ActorRotation.Yaw))};
+	// Get view yaw in the appropriate coordinate space (must match ActorRotation which is in gravity space)
+	float ViewYaw = GetGravityAwareViewYaw(ViewState.Rotation);
+
+	auto ViewRelativeAngle{FMath::UnwindDegrees(ViewYaw - ActorRotation.Yaw)};
 
 	if (FMath::Abs(ViewRelativeAngle) <= AlsCharacter::MinAimingYawAngleLimit + UE_KINDA_SMALL_NUMBER)
 	{
@@ -1772,7 +1870,7 @@ bool AAlsCharacter::ConstrainAimingRotation(FRotator& ActorRotation, const float
 
 	const auto PreviousActorYawAngle{ActorRotation.Yaw};
 
-	ActorRotation.Yaw = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw - ViewRelativeAngle));
+	ActorRotation.Yaw = FMath::UnwindDegrees(ViewYaw - ViewRelativeAngle);
 
 	// We use UE_KINDA_SMALL_NUMBER here because even if ViewRelativeAngle hasn't
 	// changed, converting it back to ActorRotation.Yaw may introduce a rounding
@@ -1809,10 +1907,19 @@ void AAlsCharacter::ApplyRotationYawSpeedAnimationCurve(const float DeltaTime)
 	const auto DeltaYawAngle{GetMesh()->GetAnimInstance()->GetCurveValue(UAlsConstants::RotationYawSpeedCurveName()) * DeltaTime};
 	if (FMath::Abs(DeltaYawAngle) > UE_SMALL_NUMBER)
 	{
-		auto NewRotation{GetActorRotation()};
-		NewRotation.Yaw += DeltaYawAngle;
-
-		SetActorRotation(NewRotation);
+		// For custom gravity: use WorldRotationToGravityYaw to correctly handle dynamic gravity changes
+		if (UAlsGravityUtility::HasCustomGravity(this))
+		{
+			const float CurrentYaw = WorldRotationToGravityYaw(GetActorQuat());
+			const float NewYaw = CurrentYaw + DeltaYawAngle;
+			SetActorRotation(GravityYawToWorldRotation(NewYaw));
+		}
+		else
+		{
+			auto NewRotation{GetActorRotation()};
+			NewRotation.Yaw += DeltaYawAngle;
+			SetActorRotation(NewRotation);
+		}
 
 		RefreshTargetYawAngleUsingActorRotation();
 	}
@@ -1848,8 +1955,13 @@ void AAlsCharacter::RefreshInAirRotation(const float DeltaTime)
 				break;
 
 			case EAlsInAirRotationMode::KeepRelativeRotation:
-				SetRotationSmooth(UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw - LocomotionState.ViewRelativeTargetYawAngle),
-				                  DeltaTime, RotationInterpolationHalfLife);
+				{
+					// Get view yaw in the appropriate coordinate space
+					float ViewYaw = GetGravityAwareViewYaw(ViewState.Rotation);
+
+					SetRotationSmooth(ViewYaw - LocomotionState.ViewRelativeTargetYawAngle,
+					                  DeltaTime, RotationInterpolationHalfLife);
+				}
 				break;
 
 			default:
@@ -1876,26 +1988,39 @@ void AAlsCharacter::RefreshInAirAimingRotation(const float DeltaTime)
 {
 	static constexpr auto RotationInterpolationHalfLife{0.1f};
 
-	SetTargetYawAngle(UE_REAL_TO_FLOAT(ViewState.Rotation.Yaw));
+	// Get view yaw in the appropriate coordinate space
+	float ViewYaw = GetGravityAwareViewYaw(ViewState.Rotation);
 
-	auto NewRotation{GetActorRotation()};
+	SetTargetYawAngle(ViewYaw);
+
+	// For custom gravity: use WorldRotationToGravityYaw to correctly handle dynamic gravity changes
+	FRotator NewRotation;
+	if (UAlsGravityUtility::HasCustomGravity(this))
+	{
+		NewRotation = FRotator(0.0f, WorldRotationToGravityYaw(GetActorQuat()), 0.0f);
+	}
+	else
+	{
+		NewRotation = GetActorRotation();
+	}
+
 	NewRotation.Yaw = UAlsRotation::DamperExactAngle(UE_REAL_TO_FLOAT(FMath::UnwindDegrees(NewRotation.Yaw)),
 	                                                 LocomotionState.SmoothTargetYawAngle, DeltaTime, RotationInterpolationHalfLife);
 
 	ConstrainAimingRotation(NewRotation, DeltaTime);
 
-	SetActorRotation(NewRotation);
+	SetActorRotationGravitySpace(NewRotation);
 }
 
 void AAlsCharacter::SetRotationSmooth(const float TargetYawAngle, const float DeltaTime, const float InterpolationHalfLife)
 {
 	SetTargetYawAngle(TargetYawAngle);
 
-	auto NewRotation{GetActorRotation()};
-	NewRotation.Yaw = UAlsRotation::DamperExactAngle(UE_REAL_TO_FLOAT(FMath::UnwindDegrees(NewRotation.Yaw)),
-	                                                 LocomotionState.SmoothTargetYawAngle, DeltaTime, InterpolationHalfLife);
+	const float CurrentYaw{WorldRotationToGravityYaw(GetActorQuat())};
+	const float NewYaw{UAlsRotation::DamperExactAngle(CurrentYaw, LocomotionState.SmoothTargetYawAngle,
+	                                                   DeltaTime, InterpolationHalfLife)};
 
-	SetActorRotation(NewRotation);
+	SetActorRotation(GravityYawToWorldRotation(NewYaw));
 }
 
 void AAlsCharacter::SetRotationExtraSmooth(const float TargetYawAngle, const float DeltaTime,
@@ -1903,26 +2028,23 @@ void AAlsCharacter::SetRotationExtraSmooth(const float TargetYawAngle, const flo
 {
 	SetTargetYawAngleSmooth(TargetYawAngle, DeltaTime, TargetYawAngleRotationSpeed);
 
-	auto NewRotation{GetActorRotation()};
-	NewRotation.Yaw = UAlsRotation::DamperExactAngle(UE_REAL_TO_FLOAT(FMath::UnwindDegrees(NewRotation.Yaw)),
-	                                                 LocomotionState.SmoothTargetYawAngle, DeltaTime, InterpolationHalfLife);
+	const float CurrentYaw{WorldRotationToGravityYaw(GetActorQuat())};
+	const float NewYaw{UAlsRotation::DamperExactAngle(CurrentYaw, LocomotionState.SmoothTargetYawAngle,
+	                                                   DeltaTime, InterpolationHalfLife)};
 
-	SetActorRotation(NewRotation);
+	SetActorRotation(GravityYawToWorldRotation(NewYaw));
 }
 
 void AAlsCharacter::SetRotationInstant(const float TargetYawAngle, const ETeleportType Teleport)
 {
 	SetTargetYawAngle(TargetYawAngle);
 
-	auto NewRotation{GetActorRotation()};
-	NewRotation.Yaw = TargetYawAngle;
-
-	SetActorRotation(NewRotation, Teleport);
+	SetActorRotation(GravityYawToWorldRotation(TargetYawAngle), Teleport);
 }
 
 void AAlsCharacter::RefreshTargetYawAngleUsingActorRotation()
 {
-	const auto YawAngle{UE_REAL_TO_FLOAT(GetActorRotation().Yaw)};
+	const auto YawAngle{WorldRotationToGravityYaw(GetActorQuat())};
 
 	SetTargetYawAngle(YawAngle);
 }
@@ -1948,6 +2070,20 @@ void AAlsCharacter::SetTargetYawAngleSmooth(const float TargetYawAngle, const fl
 
 void AAlsCharacter::RefreshViewRelativeTargetYawAngle()
 {
-	LocomotionState.ViewRelativeTargetYawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(
-		ViewState.Rotation.Yaw - LocomotionState.TargetYawAngle));
+	if (UAlsGravityUtility::HasCustomGravity(this))
+	{
+		// Transform view rotation to gravity space to match TargetYawAngle coordinate space
+		const FQuat WorldToGravityTransform{GetWorldToGravityTransform()};
+		const FQuat GravitySpaceViewRotation{WorldToGravityTransform * ViewState.Rotation.Quaternion()};
+		const float GravitySpaceViewYaw = UE_REAL_TO_FLOAT(GravitySpaceViewRotation.Rotator().Yaw);
+
+		LocomotionState.ViewRelativeTargetYawAngle = FMath::UnwindDegrees(
+			GravitySpaceViewYaw - LocomotionState.TargetYawAngle);
+	}
+	else
+	{
+		// Standard path: both angles in world space
+		LocomotionState.ViewRelativeTargetYawAngle = FMath::UnwindDegrees(UE_REAL_TO_FLOAT(
+			ViewState.Rotation.Yaw - LocomotionState.TargetYawAngle));
+	}
 }

@@ -1,5 +1,11 @@
 <img src="Resources/Icon128.png" align="right" width="110">
 
+### About this branch
+
+This branch has been modified to support the [Custom Gravity Direction](https://dev.epicgames.com/community/learning/tutorials/w6l7/unreal-engine-custom-gravity-in-ue-5-4) that was added in Unreal 5.4+. Usage details below.
+
+---
+
 # Advanced Locomotion System Refactored
 
 Completely reworked and improved С++ version of [Advanced Locomotion System V4](https://www.fab.com/listings/ef9651a4-fb55-4866-a2d9-1b38b028f9c7).
@@ -57,6 +63,14 @@ For more information, see the [Releases](https://github.com/Sixze/ALS-Refactored
 
 1. Clone the repository to your project's `Plugins` folder, or download the latest release and extract it to your project's `Plugins` folder.
 2. Recompile your project.
+
+## Quick Start (Custom Gravity)
+
+1. Copy of `BP_Als_Character` and reparent it to `AlsGravityCharacterExample`.
+2. Copy of `BP_Als_PlayerController` and reparent it to `AlsGravityControllerExample`.
+3. Copy of `BP_Als_GameMode` point *Default Pawn Class* and *Player Controller Class* at the new classes.
+
+When you call `SetGravityDirection` on your character's `CharacterMovementComponent` the character, camera, and controls should all orient correctly to the new gravity direction.
 
 ## Known Issues & Discussion
 

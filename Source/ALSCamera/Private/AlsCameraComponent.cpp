@@ -8,6 +8,7 @@
 #include "GameFramework/WorldSettings.h"
 #include "Utility/AlsCameraConstants.h"
 #include "Utility/AlsDebugUtility.h"
+#include "Utility/AlsGravityUtility.h"
 #include "Utility/AlsMacros.h"
 #include "Utility/AlsRotation.h"
 #include "Utility/AlsUtility.h"
@@ -141,7 +142,16 @@ FVector UAlsCameraComponent::GetThirdPersonTraceStartLocation() const
 void UAlsCameraComponent::GetViewInfo(FMinimalViewInfo& ViewInfo) const
 {
 	ViewInfo.Location = CameraLocation;
-	ViewInfo.Rotation = CameraRotation;
+
+	// If using custom gravity, CameraRotation is in gravity-relative space
+	// Transform it back to world space for rendering
+	FRotator FinalCameraRotation = CameraRotation;
+	if (UAlsGravityUtility::HasCustomGravity(Character))
+	{
+		FinalCameraRotation = UAlsGravityUtility::GravityToWorldRotation(CameraRotation, Character);
+	}
+
+	ViewInfo.Rotation = FinalCameraRotation;
 	ViewInfo.FOV = CameraFieldOfView;
 
 	ViewInfo.PostProcessBlendWeight = IsValid(Settings) ? PostProcessWeight : 0.0f;
@@ -208,7 +218,15 @@ void UAlsCameraComponent::TickCamera(const float DeltaTime, bool bAllowLag)
 		}
 	}
 
-	const auto CameraTargetRotation{Character->GetViewRotation()};
+	// Get the view rotation - if using custom gravity, transform it to gravity-relative space
+	// to avoid Euler angle discontinuities in world space
+	FRotator CameraTargetRotation{Character->GetViewRotation()};
+
+	if (UAlsGravityUtility::HasCustomGravity(Character))
+	{
+		// Transform world-space rotation to gravity-relative space
+		CameraTargetRotation = UAlsGravityUtility::WorldToGravityRotation(CameraTargetRotation, Character);
+	}
 
 	const auto PreviousPivotTargetLocation{PivotTargetLocation};
 
@@ -252,7 +270,13 @@ void UAlsCameraComponent::TickCamera(const float DeltaTime, bool bAllowLag)
 		CameraRotation = CalculateCameraRotation(CameraTargetRotation, DeltaTime, bAllowLag);
 	}
 
-	const FQuat CameraYawRotation{FVector::ZAxisVector, FMath::DegreesToRadians(CameraRotation.Yaw)};
+	// Calculate camera yaw rotation for pivot lag
+	// Use gravity-up axis if character has custom gravity, otherwise use world Z
+	const FVector YawAxis = UAlsGravityUtility::HasCustomGravity(Character)
+		                        ? UAlsGravityUtility::GetGravityUpVector(Character)
+		                        : FVector::ZAxisVector;
+
+	const FQuat CameraYawRotation{YawAxis, FMath::DegreesToRadians(CameraRotation.Yaw)};
 
 #if ENABLE_DRAW_DEBUG
 	if (bDisplayDebugCameraShapes)
@@ -377,12 +401,22 @@ FVector UAlsCameraComponent::CalculatePivotOffset() const
 
 FVector UAlsCameraComponent::CalculateCameraOffset() const
 {
-	return CameraRotation.RotateVector(
-		FVector{
-			GetAnimInstance()->GetCurveValue(UAlsCameraConstants::CameraOffsetXCurveName()),
-			GetAnimInstance()->GetCurveValue(UAlsCameraConstants::CameraOffsetYCurveName()),
-			GetAnimInstance()->GetCurveValue(UAlsCameraConstants::CameraOffsetZCurveName())
-		} * Character->GetMesh()->GetComponentScale().Z);
+	FVector Offset{
+		GetAnimInstance()->GetCurveValue(UAlsCameraConstants::CameraOffsetXCurveName()),
+		GetAnimInstance()->GetCurveValue(UAlsCameraConstants::CameraOffsetYCurveName()),
+		GetAnimInstance()->GetCurveValue(UAlsCameraConstants::CameraOffsetZCurveName())
+	};
+	Offset *= Character->GetMesh()->GetComponentScale().Z;
+
+	// If using custom gravity, CameraRotation is in gravity-relative space
+	// Transform it to world space before rotating the offset
+	FRotator WorldCameraRotation = CameraRotation;
+	if (UAlsGravityUtility::HasCustomGravity(Character))
+	{
+		WorldCameraRotation = UAlsGravityUtility::GravityToWorldRotation(CameraRotation, Character);
+	}
+
+	return WorldCameraRotation.RotateVector(Offset);
 }
 
 float UAlsCameraComponent::CalculateFovOffset() const

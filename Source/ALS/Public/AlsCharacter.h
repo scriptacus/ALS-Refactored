@@ -429,6 +429,23 @@ public:
 
 	void CharacterMovement_OnPhysicsRotation(float DeltaTime);
 
+protected:
+	// Gravity-space transform utilities for custom gravity support
+	FQuat GetWorldToGravityTransform() const;
+
+	// Rotation conversion between world space and gravity space
+	float WorldRotationToGravityYaw(const FQuat& WorldRotation) const;
+	FQuat GravityYawToWorldRotation(float GravitySpaceYaw) const;
+
+	// Gravity-space rotation accessors
+	FRotator GetActorRotationGravitySpace() const;
+	void SetActorRotationGravitySpace(const FRotator& GravitySpaceRotation, ETeleportType Teleport = ETeleportType::None);
+
+	// Helpers for calculating gravity-aware animation state
+	float VectorToGravitySpaceYawAngle(const FVector& Direction) const;
+	float GetGravityAwareSpeed(const FVector& Velocity) const;
+	float GetGravityAwareViewYaw(const FRotator& ViewRotation) const;
+
 private:
 	void RefreshGroundedRotation(float DeltaTime);
 

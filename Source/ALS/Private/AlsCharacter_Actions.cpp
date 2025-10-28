@@ -13,6 +13,7 @@
 #include "Settings/AlsCharacterSettings.h"
 #include "Utility/AlsConstants.h"
 #include "Utility/AlsDebugUtility.h"
+#include "Utility/AlsGravityUtility.h"
 #include "Utility/AlsLog.h"
 #include "Utility/AlsMacros.h"
 #include "Utility/AlsMontageUtility.h"
@@ -24,8 +25,8 @@ void AAlsCharacter::StartRolling(const float PlayRate)
 	if (LocomotionMode == AlsLocomotionModeTags::Grounded)
 	{
 		StartRolling(PlayRate, Settings->Rolling.bRotateToInputOnStart && LocomotionState.bHasInput
-			                       ? LocomotionState.InputYawAngle
-			                       : UE_REAL_TO_FLOAT(FMath::UnwindDegrees(GetActorRotation().Yaw)));
+								   ? LocomotionState.InputYawAngle
+								   : WorldRotationToGravityYaw(GetActorQuat()));
 	}
 }
 
@@ -50,7 +51,7 @@ void AAlsCharacter::StartRolling(const float PlayRate, const float TargetYawAngl
 		return;
 	}
 
-	const auto InitialYawAngle{UE_REAL_TO_FLOAT(FMath::UnwindDegrees(GetActorRotation().Yaw))};
+	const auto InitialYawAngle{WorldRotationToGravityYaw(GetActorQuat())};
 
 	if (GetLocalRole() >= ROLE_Authority)
 	{
@@ -119,21 +120,42 @@ void AAlsCharacter::RefreshRollingPhysics(const float DeltaTime)
 		return;
 	}
 
-	auto TargetRotation{GetCharacterMovement()->UpdatedComponent->GetComponentRotation()};
-
-	if (Settings->Rolling.RotationInterpolationHalfLife <= 0.0f)
+	if (UAlsGravityUtility::HasCustomGravity(this))
 	{
-		TargetRotation.Yaw = RollingState.TargetYawAngle;
-
-		GetCharacterMovement()->MoveUpdatedComponent(FVector::ZeroVector, TargetRotation, false, nullptr, ETeleportType::TeleportPhysics);
+		// Custom gravity path: work in gravity space and convert to/from world space
+		if (Settings->Rolling.RotationInterpolationHalfLife <= 0.0f)
+		{
+			const FQuat TargetRotation = GravityYawToWorldRotation(RollingState.TargetYawAngle);
+			GetCharacterMovement()->MoveUpdatedComponent(FVector::ZeroVector, TargetRotation.Rotator(), false, nullptr, ETeleportType::TeleportPhysics);
+		}
+		else
+		{
+			const float CurrentGravityYaw = WorldRotationToGravityYaw(GetCharacterMovement()->UpdatedComponent->GetComponentQuat());
+			const float InterpolatedGravityYaw = UAlsRotation::DamperExactAngle(CurrentGravityYaw,
+			                                                                     RollingState.TargetYawAngle, DeltaTime,
+			                                                                     Settings->Rolling.RotationInterpolationHalfLife);
+			const FQuat TargetRotation = GravityYawToWorldRotation(InterpolatedGravityYaw);
+			GetCharacterMovement()->MoveUpdatedComponent(FVector::ZeroVector, TargetRotation.Rotator(), false);
+		}
 	}
 	else
 	{
-		TargetRotation.Yaw = UAlsRotation::DamperExactAngle(UE_REAL_TO_FLOAT(FMath::UnwindDegrees(TargetRotation.Yaw)),
-		                                                    RollingState.TargetYawAngle, DeltaTime,
-		                                                    Settings->Rolling.RotationInterpolationHalfLife);
+		// Original path: standard gravity (Z-up)
+		auto TargetRotation{GetCharacterMovement()->UpdatedComponent->GetComponentRotation()};
 
-		GetCharacterMovement()->MoveUpdatedComponent(FVector::ZeroVector, TargetRotation, false);
+		if (Settings->Rolling.RotationInterpolationHalfLife <= 0.0f)
+		{
+			TargetRotation.Yaw = RollingState.TargetYawAngle;
+			
+			GetCharacterMovement()->MoveUpdatedComponent(FVector::ZeroVector, TargetRotation, false, nullptr, ETeleportType::TeleportPhysics);
+		}
+		else
+		{
+			TargetRotation.Yaw = UAlsRotation::DamperExactAngle(UE_REAL_TO_FLOAT(FMath::UnwindDegrees(TargetRotation.Yaw)),
+			                                                    RollingState.TargetYawAngle, DeltaTime,
+			                                                    Settings->Rolling.RotationInterpolationHalfLife);
+			GetCharacterMovement()->MoveUpdatedComponent(FVector::ZeroVector, TargetRotation, false);
+		}
 	}
 }
 
@@ -162,7 +184,7 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 	}
 
 	const auto ActorLocation{GetActorLocation()};
-	const auto ActorYawAngle{UE_REAL_TO_FLOAT(FMath::UnwindDegrees(GetActorRotation().Yaw))};
+	const auto ActorYawAngle{WorldRotationToGravityYaw(GetActorQuat())};
 
 	float ForwardTraceAngle;
 	if (LocomotionState.bHasVelocity)
@@ -184,10 +206,10 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 		return false;
 	}
 
-	const auto ForwardTraceDirection{
-		UAlsVector::AngleToDirectionXY(
-			ActorYawAngle + FMath::ClampAngle(ForwardTraceDeltaAngle, -Settings->Mantling.MaxReachAngle, Settings->Mantling.MaxReachAngle))
-	};
+	// Convert gravity-space yaw angle to world-space forward direction
+	const float ClampedTraceAngle = ActorYawAngle + FMath::ClampAngle(ForwardTraceDeltaAngle, -Settings->Mantling.MaxReachAngle, Settings->Mantling.MaxReachAngle);
+	const FQuat ForwardTraceRotation = GravityYawToWorldRotation(ClampedTraceAngle);
+	const FVector ForwardTraceDirection = ForwardTraceRotation.GetForwardVector();
 
 #if ENABLE_DRAW_DEBUG
 	const auto bDisplayDebug{UAlsDebugUtility::ShouldDisplayDebugForActor(this, UAlsConstants::MantlingDebugDisplayName())};
@@ -199,7 +221,9 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 	const auto CapsuleRadius{Capsule->GetScaledCapsuleRadius()};
 	const auto CapsuleHalfHeight{Capsule->GetScaledCapsuleHalfHeight()};
 
-	const FVector CapsuleBottomLocation{ActorLocation.X, ActorLocation.Y, ActorLocation.Z - CapsuleHalfHeight};
+	// Get the gravity-down direction to calculate capsule bottom
+	const FVector GravityDown = AlsCharacterMovement->GetGravityDirection();
+	const FVector CapsuleBottomLocation = ActorLocation + GravityDown * CapsuleHalfHeight;
 
 	const auto TraceCapsuleRadius{CapsuleRadius - 1.0f};
 
@@ -209,21 +233,31 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 
 	static const FName ForwardTraceTag{FString::Printf(TEXT("%hs (Forward Trace)"), __FUNCTION__)};
 
-	auto ForwardTraceStart{CapsuleBottomLocation - ForwardTraceDirection * CapsuleRadius};
-	ForwardTraceStart.Z += (TraceSettings.LedgeHeight.X + TraceSettings.LedgeHeight.Y) *
-		0.5f * CapsuleScale - UCharacterMovementComponent::MAX_FLOOR_DIST;
+	// Calculate the trace start position offset from capsule bottom along the forward direction and up from the floor
+	const FVector GravityUp = -GravityDown;
+	const float VerticalOffset = (TraceSettings.LedgeHeight.X + TraceSettings.LedgeHeight.Y) * 0.5f * CapsuleScale - UCharacterMovementComponent::MAX_FLOOR_DIST;
 
+	auto ForwardTraceStart{CapsuleBottomLocation - ForwardTraceDirection * CapsuleRadius + GravityUp * VerticalOffset};
 	auto ForwardTraceEnd{ForwardTraceStart + ForwardTraceDirection * (CapsuleRadius + (TraceSettings.ReachDistance + 1.0f) * CapsuleScale)};
 
 	const auto ForwardTraceCapsuleHalfHeight{LedgeHeightDelta * 0.5f};
 
+	// The trace capsule needs to be oriented along the gravity-up direction
+	// Calculate a rotation that aligns the capsule's up axis with gravity-up
+	const FQuat TraceCapsuleRotation = FQuat::FindBetweenNormals(FVector::UpVector, GravityUp);
+
 	FHitResult ForwardTraceHit;
 	GetWorld()->SweepSingleByChannel(ForwardTraceHit, ForwardTraceStart, ForwardTraceEnd,
-	                                 FQuat::Identity, Settings->Mantling.MantlingTraceChannel,
+	                                 TraceCapsuleRotation, Settings->Mantling.MantlingTraceChannel,
 	                                 FCollisionShape::MakeCapsule(TraceCapsuleRadius, ForwardTraceCapsuleHalfHeight),
 	                                 {ForwardTraceTag, false, this}, Settings->Mantling.MantlingTraceResponses);
 
 	auto* TargetPrimitive{ForwardTraceHit.GetComponent()};
+
+	auto A = ForwardTraceHit.IsValidBlockingHit();
+	auto B = TargetPrimitive && TargetPrimitive->CanCharacterStepUp(this);
+	auto C = GetCharacterMovement()->IsWalkable(ForwardTraceHit);
+	auto D = A && B && C;
 
 	if (!ForwardTraceHit.IsValidBlockingHit() ||
 	    !IsValid(TargetPrimitive) ||
@@ -243,33 +277,31 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 		return false;
 	}
 
-	const auto TargetDirection{-ForwardTraceHit.ImpactNormal.GetSafeNormal2D()};
+	// Project the impact normal onto the gravity plane to get horizontal direction toward the wall
+	const FVector ImpactNormalProjected = (ForwardTraceHit.ImpactNormal - GravityUp * (ForwardTraceHit.ImpactNormal | GravityUp)).GetSafeNormal();
+	const auto TargetDirection{-ImpactNormalProjected};
 
 	// Trace downward from the first trace's impact point and determine if the hit location is walkable.
 
 	static const FName DownwardTraceTag{FString::Printf(TEXT("%hs (Downward Trace)"), __FUNCTION__)};
 
-	const FVector2D TargetLocationOffset{TargetDirection * (TraceSettings.TargetLocationOffset * CapsuleScale)};
+	// Calculate horizontal offset toward the ledge (in the plane perpendicular to gravity)
+	const FVector HorizontalOffset = TargetDirection * (TraceSettings.TargetLocationOffset * CapsuleScale);
 
-	const FVector DownwardTraceStart{
-		ForwardTraceHit.ImpactPoint.X + TargetLocationOffset.X,
-		ForwardTraceHit.ImpactPoint.Y + TargetLocationOffset.Y,
-		CapsuleBottomLocation.Z + LedgeHeightDelta + 2.5f * TraceCapsuleRadius + UCharacterMovementComponent::MIN_FLOOR_DIST
-	};
+	// Calculate vertical offsets along the gravity direction
+	const float DownwardTraceStartHeight = LedgeHeightDelta + 2.5f * TraceCapsuleRadius + UCharacterMovementComponent::MIN_FLOOR_DIST;
+	const float DownwardTraceEndHeight = TraceSettings.LedgeHeight.GetMin() * CapsuleScale + TraceCapsuleRadius - UCharacterMovementComponent::MAX_FLOOR_DIST;
 
-	const FVector DownwardTraceEnd{
-		DownwardTraceStart.X,
-		DownwardTraceStart.Y,
-		CapsuleBottomLocation.Z +
-		TraceSettings.LedgeHeight.GetMin() * CapsuleScale + TraceCapsuleRadius - UCharacterMovementComponent::MAX_FLOOR_DIST
-	};
+	// const FVector DownwardTraceStart = ForwardTraceHit.ImpactPoint + HorizontalOffset + GravityUp * (DownwardTraceStartHeight - (ForwardTraceHit.ImpactPoint - CapsuleBottomLocation) | GravityUp);
+	const FVector DownwardTraceStart = ForwardTraceHit.ImpactPoint + HorizontalOffset + GravityUp * (DownwardTraceStartHeight - ((ForwardTraceHit.ImpactPoint - CapsuleBottomLocation) | GravityUp));	const FVector DownwardTraceEnd = CapsuleBottomLocation + HorizontalOffset + GravityUp * DownwardTraceEndHeight;
 
 	FHitResult DownwardTraceHit;
 	GetWorld()->SweepSingleByChannel(DownwardTraceHit, DownwardTraceStart, DownwardTraceEnd, FQuat::Identity,
 	                                 Settings->Mantling.MantlingTraceChannel, FCollisionShape::MakeSphere(TraceCapsuleRadius),
 	                                 {DownwardTraceTag, false, this}, Settings->Mantling.MantlingTraceResponses);
 
-	const auto SlopeAngleCos{UE_REAL_TO_FLOAT(DownwardTraceHit.ImpactNormal.Z)};
+	// Calculate slope angle relative to gravity direction (dot product with gravity-up)
+	const auto SlopeAngleCos{UE_REAL_TO_FLOAT(DownwardTraceHit.ImpactNormal | GravityUp)};
 
 	// The approximate slope angle is used in situations where the normal slope angle cannot convey
 	// the true nature of the surface slope, for example, for a 45 degree staircase the slope
@@ -278,7 +310,7 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 	auto ApproximateSlopeNormal{DownwardTraceHit.Location - DownwardTraceHit.ImpactPoint};
 	ApproximateSlopeNormal.Normalize();
 
-	const auto ApproximateSlopeAngleCos{UE_REAL_TO_FLOAT(ApproximateSlopeNormal.Z)};
+	const auto ApproximateSlopeAngleCos{UE_REAL_TO_FLOAT(ApproximateSlopeNormal | GravityUp)};
 
 	if (SlopeAngleCos < Settings->Mantling.SlopeAngleThresholdCos ||
 	    ApproximateSlopeAngleCos < Settings->Mantling.SlopeAngleThresholdCos ||
@@ -304,15 +336,13 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 
 	static const FName TargetLocationTraceTag{FString::Printf(TEXT("%hs (Target Location Overlap)"), __FUNCTION__)};
 
-	const FVector TargetLocation{
-		DownwardTraceHit.Location.X,
-		DownwardTraceHit.Location.Y,
-		DownwardTraceHit.ImpactPoint.Z + UCharacterMovementComponent::MIN_FLOOR_DIST
-	};
+	// Calculate target location: horizontal position from downward trace, vertical position from impact point
+	const FVector TargetLocation = DownwardTraceHit.ImpactPoint + GravityUp * UCharacterMovementComponent::MIN_FLOOR_DIST;
 
-	const FVector TargetCapsuleLocation{TargetLocation.X, TargetLocation.Y, TargetLocation.Z + CapsuleHalfHeight};
+	// Offset the capsule center up from the target location by the capsule half height
+	const FVector TargetCapsuleLocation = TargetLocation + GravityUp * CapsuleHalfHeight;
 
-	if (GetWorld()->OverlapBlockingTestByChannel(TargetCapsuleLocation, FQuat::Identity, Settings->Mantling.MantlingTraceChannel,
+	if (GetWorld()->OverlapBlockingTestByChannel(TargetCapsuleLocation, TraceCapsuleRotation, Settings->Mantling.MantlingTraceChannel,
 	                                             FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight),
 	                                             {TargetLocationTraceTag, false, this}, Settings->Mantling.MantlingTraceResponses))
 	{
@@ -340,19 +370,19 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 
 	static const FName StartLocationTraceTag{FString::Printf(TEXT("%hs (Start Location Overlap)"), __FUNCTION__)};
 
-	const FVector2D StartLocationOffset{TargetDirection * (TraceSettings.StartLocationOffset * CapsuleScale)};
+	// Calculate horizontal offset back toward the character
+	const FVector StartLocationHorizontalOffset = -TargetDirection * (TraceSettings.StartLocationOffset * CapsuleScale);
 
-	const FVector StartLocation{
-		ForwardTraceHit.ImpactPoint.X - StartLocationOffset.X,
-		ForwardTraceHit.ImpactPoint.Y - StartLocationOffset.Y,
-		(DownwardTraceHit.Location.Z + DownwardTraceEnd.Z) * 0.5f
-	};
+	// Calculate the vertical center point between the downward trace hit and end
+	const float StartLocationVerticalOffset = ((DownwardTraceHit.Location - DownwardTraceEnd) | GravityUp) * 0.5f;
+
+	const FVector StartLocation = ForwardTraceHit.ImpactPoint + StartLocationHorizontalOffset + GravityUp * StartLocationVerticalOffset;
 
 	const auto StartLocationTraceCapsuleHalfHeight{
-		UE_REAL_TO_FLOAT(DownwardTraceHit.Location.Z - DownwardTraceEnd.Z) * 0.5f + TraceCapsuleRadius
+		UE_REAL_TO_FLOAT(((DownwardTraceHit.Location - DownwardTraceEnd) | GravityUp) * 0.5f) + TraceCapsuleRadius
 	};
 
-	if (GetWorld()->OverlapBlockingTestByChannel(StartLocation, FQuat::Identity, Settings->Mantling.MantlingTraceChannel,
+	if (GetWorld()->OverlapBlockingTestByChannel(StartLocation, TraceCapsuleRotation, Settings->Mantling.MantlingTraceChannel,
 	                                             FCollisionShape::MakeCapsule(TraceCapsuleRadius, StartLocationTraceCapsuleHalfHeight),
 	                                             {StartLocationTraceTag, false, this}, Settings->Mantling.MantlingTraceResponses))
 	{
@@ -389,12 +419,16 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 	}
 #endif
 
-	const auto TargetRotation{TargetDirection.ToOrientationQuat()};
+	// Calculate target rotation: character should face away from the wall (direction of the climb)
+	// TargetDirection already points away from the wall (toward the ledge), which is correct
+	const FVector TargetForward = TargetDirection;
+	const FQuat TargetRotation = FRotationMatrix::MakeFromXZ(TargetForward, GravityUp).ToQuat();
 
 	FAlsMantlingParameters Parameters;
 
 	Parameters.TargetPrimitive = TargetPrimitive;
-	Parameters.MantlingHeight = UE_REAL_TO_FLOAT((TargetLocation.Z - CapsuleBottomLocation.Z) / CapsuleScale);
+	// Calculate mantling height in gravity-relative space
+	Parameters.MantlingHeight = UE_REAL_TO_FLOAT(((TargetLocation - CapsuleBottomLocation) | GravityUp) / CapsuleScale);
 
 	// Determine the mantling type by checking the movement mode and mantling height.
 
