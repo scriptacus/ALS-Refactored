@@ -3,6 +3,7 @@
 ### About this branch
 
 This branch has been modified to support the [Custom Gravity Direction](https://dev.epicgames.com/community/learning/tutorials/w6l7/unreal-engine-custom-gravity-in-ue-5-4) that was added in Unreal 5.4+. Usage details below.
+Only the 4.16 (UE5.6.1) version has been tested.
 
 ---
 
