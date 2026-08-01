@@ -12,13 +12,13 @@ public:
 	static constexpr auto CounterClockwiseRotationAngleThreshold{5.0f};
 
 public:
-	template <typename ValueType> requires std::is_floating_point_v<ValueType>
+	template <typename ValueType> requires UE::CFloatingPoint<ValueType>
 	static constexpr ValueType RemapAngleForCounterClockwiseRotation(ValueType Angle);
 
 	static VectorRegister4Double RemapRotationForCounterClockwiseRotation(const VectorRegister4Double& Rotation);
 
-	// Remaps the angle from the [175, 180] range to [-185, -180]. Used to
-	// make the character rotate counterclockwise during a 180 degree turn.
+	/// Remaps the angle from the [175, 180] range to the [-185, -180] range. It is
+	/// used to make the character rotate counterclockwise during an 180-degree turn.
 	UFUNCTION(BlueprintPure, Category = "ALS|Rotation Utility", Meta = (ReturnDisplayName = "Angle"))
 	static float RemapAngleForCounterClockwiseRotation(float Angle);
 
@@ -31,16 +31,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "ALS|Rotation Utility", Meta = (ReturnDisplayName = "Angle"))
 	static float InterpolateAngleConstant(float Current, float Target, float DeltaTime, float Speed);
 
-	// HalfLife is the time it takes for the distance to the target to be reduced by half.
+	/// HalfLife is the time it takes for the distance to the target to be reduced by half.
 	UFUNCTION(BlueprintPure, Category = "ALS|Rotation Utility", Meta = (ReturnDisplayName = "Angle"))
 	static float DamperExactAngle(float Current, float Target, float DeltaTime, float HalfLife);
 
-	// HalfLife is the time it takes for the distance to the target to be reduced by half.
+	/// HalfLife is the time it takes for the distance to the target to be reduced by half.
 	UFUNCTION(BlueprintPure, Category = "ALS|Rotation Utility",
 		Meta = (AutoCreateRefTerm = "Current, Target", ReturnDisplayName = "Rotation"))
 	static FRotator DamperExactRotation(const FRotator& Current, const FRotator& Target, float DeltaTime, float HalfLife);
 
-	// Same as FMath::QInterpTo(), but uses FQuat::FastLerp() instead of FQuat::Slerp().
+	/// Same as FMath::QInterpTo(), but uses FQuat::FastLerp() instead of FQuat::Slerp().
 	UFUNCTION(BlueprintPure, Category = "ALS|Rotation Utility", Meta = (ReturnDisplayName = "Quaternion"))
 	static FQuat InterpolateQuaternionFast(const FQuat& Current, const FQuat& Target, float DeltaTime, float Speed);
 
@@ -48,7 +48,7 @@ public:
 	static FQuat GetTwist(const FQuat& Quaternion, const FVector& TwistAxis = FVector::UpVector);
 };
 
-template <typename ValueType> requires std::is_floating_point_v<ValueType>
+template <typename ValueType> requires UE::CFloatingPoint<ValueType>
 constexpr ValueType UAlsRotation::RemapAngleForCounterClockwiseRotation(const ValueType Angle)
 {
 	if (Angle > 180.0f - CounterClockwiseRotationAngleThreshold)

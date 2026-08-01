@@ -20,14 +20,9 @@
 #include "Utility/AlsRotation.h"
 #include "Utility/AlsVector.h"
 
-void AAlsCharacter::StartRolling(const float PlayRate)
+UAnimMontage* AAlsCharacter::SelectRollMontage_Implementation()
 {
-	if (LocomotionMode == AlsLocomotionModeTags::Grounded)
-	{
-		StartRolling(PlayRate, Settings->Rolling.bRotateToInputOnStart && LocomotionState.bHasInput
-								   ? LocomotionState.InputYawAngle
-								   : WorldRotationToGravityYaw(GetActorQuat()));
-	}
+	return Settings->Rolling.Montage;
 }
 
 bool AAlsCharacter::IsRollingAllowedToStart(const UAnimMontage* Montage) const
@@ -37,7 +32,18 @@ bool AAlsCharacter::IsRollingAllowedToStart(const UAnimMontage* Montage) const
 	        !GetMesh()->GetAnimInstance()->Montage_IsPlaying(Montage));
 }
 
-void AAlsCharacter::StartRolling(const float PlayRate, const float TargetYawAngle)
+void AAlsCharacter::StartRollingGrounded(const float PlayRate)
+{
+	if (LocomotionMode == AlsLocomotionModeTags::Grounded)
+	{
+		StartRolling(Settings->Rolling.bRotateToInputOnStart && LocomotionState.bHasInput
+			             ? LocomotionState.InputYawAngle
+			             : WorldRotationToGravityYaw(GetActorQuat()),
+		             PlayRate);
+	}
+}
+
+void AAlsCharacter::StartRolling(const float TargetYawAngle, const float PlayRate)
 {
 	if (GetLocalRole() <= ROLE_SimulatedProxy)
 	{
@@ -64,11 +70,6 @@ void AAlsCharacter::StartRolling(const float PlayRate, const float TargetYawAngl
 		StartRollingImplementation(Montage, PlayRate, InitialYawAngle, TargetYawAngle);
 		ServerStartRolling(Montage, PlayRate, InitialYawAngle, TargetYawAngle);
 	}
-}
-
-UAnimMontage* AAlsCharacter::SelectRollMontage_Implementation()
-{
-	return Settings->Rolling.Montage;
 }
 
 void AAlsCharacter::ServerStartRolling_Implementation(UAnimMontage* Montage, const float PlayRate,
@@ -159,16 +160,25 @@ void AAlsCharacter::RefreshRollingPhysics(const float DeltaTime)
 	}
 }
 
-bool AAlsCharacter::StartMantlingGrounded()
+bool AAlsCharacter::StartMantling()
 {
-	return LocomotionMode == AlsLocomotionModeTags::Grounded &&
-	       StartMantling(Settings->Mantling.GroundedTrace);
+	if (LocomotionMode == AlsLocomotionModeTags::Grounded)
+	{
+		return StartMantling(Settings->Mantling.GroundedTrace);
+	}
+
+	if (LocomotionMode == AlsLocomotionModeTags::InAir)
+	{
+		return StartMantling(Settings->Mantling.InAirTrace);
+	}
+
+	return false;
 }
 
-bool AAlsCharacter::StartMantlingInAir()
+bool AAlsCharacter::AutoStartMantling()
 {
-	return LocomotionMode == AlsLocomotionModeTags::InAir && IsLocallyControlled() &&
-	       StartMantling(Settings->Mantling.InAirTrace);
+	return Settings->Mantling.bAutoStartMantlingInAir && LocomotionMode == AlsLocomotionModeTags::InAir &&
+	       IsLocallyControlled() && StartMantling(Settings->Mantling.InAirTrace);
 }
 
 bool AAlsCharacter::IsMantlingAllowedToStart_Implementation() const
@@ -231,7 +241,7 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 
 	// Trace forward to find an object the character cannot walk on.
 
-	static const FName ForwardTraceTag{FString::Printf(TEXT("%hs (Forward Trace)"), __FUNCTION__)};
+	static const FName ForwardTraceTag{TStringView{FAnsiString::Printf("%s (Forward Trace)", __FUNCTION__)}};
 
 	// Calculate the trace start position offset from capsule bottom along the forward direction and up from the floor
 	const FVector GravityUp = -GravityDown;
@@ -283,7 +293,7 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 
 	// Trace downward from the first trace's impact point and determine if the hit location is walkable.
 
-	static const FName DownwardTraceTag{FString::Printf(TEXT("%hs (Downward Trace)"), __FUNCTION__)};
+	static const FName DownwardTraceTag{TStringView{FAnsiString::Printf("%s (Downward Trace)", __FUNCTION__)}};
 
 	// Calculate horizontal offset toward the ledge (in the plane perpendicular to gravity)
 	const FVector HorizontalOffset = TargetDirection * (TraceSettings.TargetLocationOffset * CapsuleScale);
@@ -334,7 +344,7 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 
 	// Check that there is enough free space for the capsule at the target location.
 
-	static const FName TargetLocationTraceTag{FString::Printf(TEXT("%hs (Target Location Overlap)"), __FUNCTION__)};
+	static const FName TargetLocationTraceTag{TStringView{FAnsiString::Printf("%s (Target Location Overlap)", __FUNCTION__)}};
 
 	// Calculate target location: horizontal position from downward trace, vertical position from impact point
 	const FVector TargetLocation = DownwardTraceHit.ImpactPoint + GravityUp * UCharacterMovementComponent::MIN_FLOOR_DIST;
@@ -368,7 +378,7 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 	// Perform additional overlap at the approximate start location to
 	// ensure there are no vertical obstacles on the path, such as a ceiling.
 
-	static const FName StartLocationTraceTag{FString::Printf(TEXT("%hs (Start Location Overlap)"), __FUNCTION__)};
+	static const FName StartLocationTraceTag{TStringView{FAnsiString::Printf("%s (Start Location Overlap)", __FUNCTION__)}};
 
 	// Calculate horizontal offset back toward the character
 	const FVector StartLocationHorizontalOffset = -TargetDirection * (TraceSettings.StartLocationOffset * CapsuleScale);
@@ -438,17 +448,17 @@ bool AAlsCharacter::StartMantling(const FAlsMantlingTraceSettings& TraceSettings
 		                          ? EAlsMantlingType::High
 		                          : EAlsMantlingType::Low;
 
-	// If the target primitive can't move, then use world coordinates to save
-	// some performance by skipping some coordinate space transformations later.
+	// If the target primitive cannot move, use world space to improve performance by skipping coordinate space transformations.
 
-	if (MovementBaseUtility::UseRelativeLocation(TargetPrimitive))
+	FMovementBaseInterfaceData MovementBaseData{TargetPrimitive};
+	if (MovementBaseUtility::UseRelativeLocation(&MovementBaseData))
 	{
-		const auto TargetRelativeTransform{
+		const auto TargetTransform{
 			FTransform{TargetRotation, TargetCapsuleLocation}.GetRelativeTransform(TargetPrimitive->GetComponentTransform())
 		};
 
-		Parameters.TargetLocation = TargetRelativeTransform.GetLocation();
-		Parameters.TargetRotation = TargetRelativeTransform.Rotator();
+		Parameters.TargetLocation = TargetTransform.GetLocation();
+		Parameters.TargetRotation = TargetTransform.Rotator();
 	}
 	else
 	{
@@ -492,6 +502,13 @@ void AAlsCharacter::StartMantlingImplementation(const FAlsMantlingParameters& Pa
 		return;
 	}
 
+	if (!Parameters.TargetPrimitive.IsValid())
+	{
+		// Target primitive may be invalid on clients if the actor that the character is
+		// mantling onto is not network relevant. In this case, simply do not start mantling.
+		return;
+	}
+
 	const auto* MantlingSettings{SelectMantlingSettings(Parameters.MantlingType)};
 
 	if (!ALS_ENSURE(IsValid(MantlingSettings)) || !ALS_ENSURE(IsValid(MantlingSettings->Montage)))
@@ -513,7 +530,8 @@ void AAlsCharacter::StartMantlingImplementation(const FAlsMantlingParameters& Pa
 	GetCharacterMovement()->SetMovementMode(MOVE_Custom);
 	AlsCharacterMovement->SetMovementModeLocked(true);
 
-	GetCharacterMovement()->SetBase(Parameters.TargetPrimitive.Get());
+	FMovementBaseInterfaceData MovementBaseData{Parameters.TargetPrimitive.Get()};
+	GetCharacterMovement()->SetBase(&MovementBaseData);
 
 	// Create mantling root motion.
 
@@ -529,10 +547,10 @@ void AAlsCharacter::StartMantlingImplementation(const FAlsMantlingParameters& Pa
 	RootMotionSource->Duration = Duration / PlayRate;
 	RootMotionSource->MontageStartTime = StartTime;
 
-	const auto bUseRelativeLocation{MovementBaseUtility::UseRelativeLocation(Parameters.TargetPrimitive.Get())};
+	const auto bUseTargetPrimitiveSpace{MovementBaseUtility::UseRelativeLocation(&MovementBaseData)};
 	const FTransform MeshTransform{GetBaseRotationOffset()};
 
-	// Extract the initial root transform, invert it, convert from the mesh space to the actor space, and apply it to the actor's transform.
+	// Extract the initial root transform, invert it, convert it from component space to actor space, and apply it to the actor transform.
 
 	const auto ActorTransform{GetActorTransform()};
 
@@ -542,20 +560,20 @@ void AAlsCharacter::StartMantlingImplementation(const FAlsMantlingParameters& Pa
 	const auto StartRootTransformInverse{StartRootTransform.GetRelativeTransformReverse(MeshTransform)};
 	auto StartTransform{StartRootTransformInverse * ActorTransform};
 
-	if (bUseRelativeLocation)
+	if (bUseTargetPrimitiveSpace)
 	{
-		// Convert the actor's transform to be relative to the target primitive.
+		// Convert the start transform to the target primitive space.
 		StartTransform.SetToRelativeTransform(Parameters.TargetPrimitive->GetComponentTransform());
 	}
 
 	RootMotionSource->StartRotation = StartTransform.Rotator();
 	RootMotionSource->StartLocation = StartTransform.GetLocation();
 
-	// Extract the final root transform, invert it, convert from the mesh space to the actor space, and apply it to the target transform.
+	// Extract the final root transform, invert it, convert it from component space to actor space, and apply it to the target transform.
 
 	FTransform TargetTransform{Parameters.TargetRotation.GetNormalized(), Parameters.TargetLocation};
 
-	if (bUseRelativeLocation)
+	if (bUseTargetPrimitiveSpace)
 	{
 		// Convert the relative target transform back to world space.
 		TargetTransform *= Parameters.TargetPrimitive->GetComponentTransform();
@@ -568,7 +586,7 @@ void AAlsCharacter::StartMantlingImplementation(const FAlsMantlingParameters& Pa
 	const auto EndRootTransformInverse{EndRootTransform.GetRelativeTransformReverse(MeshTransform)};
 	auto NewTargetTransform{EndRootTransformInverse * TargetTransform};
 
-	if (bUseRelativeLocation)
+	if (bUseTargetPrimitiveSpace)
 	{
 		// Convert the target transform to be relative to the target primitive.
 		NewTargetTransform.SetToRelativeTransform(Parameters.TargetPrimitive->GetComponentTransform());
@@ -810,7 +828,7 @@ void AAlsCharacter::StartRagdollingImplementation()
 	GetMesh()->SetSimulatePhysics(true);
 
 	// This is required for the ragdoll to behave properly when any body instance is set to simulated in a physics asset.
-	// TODO Check the need for this in future engine versions.
+	// TODO Check the need for this hack in future engine versions.
 	GetMesh()->ResetAllBodiesSimulatePhysics();
 
 	const auto* PelvisBody{GetMesh()->GetBodyInstance(UAlsConstants::PelvisBoneName())};
@@ -1080,6 +1098,11 @@ void AAlsCharacter::MulticastStopRagdolling_Implementation()
 void AAlsCharacter::StopRagdollingImplementation()
 {
 	if (!IsRagdollingAllowedToStop())
+	{
+		return;
+	}
+
+	if (!AnimationInstance.IsValid() || GetMesh()->GetComponentSpaceTransforms().IsEmpty())
 	{
 		return;
 	}

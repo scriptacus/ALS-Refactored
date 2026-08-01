@@ -91,20 +91,22 @@ FAlsRigVMFunction_IsGameWorld_Execute()
 	const auto* World{ExecuteContext.GetWorld()};
 
 	BlockToRun = IsValid(World) && World->IsGameWorld()
-		             ? FName{GET_MEMBER_NAME_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, True)}
-		             : FName{GET_MEMBER_NAME_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, False)};
+		             ? FName{GET_MEMBER_NAME_ANSI_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, True)}
+		             : FName{GET_MEMBER_NAME_ANSI_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, False)};
 #else
-	BlockToRun = FName{GET_MEMBER_NAME_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, True)};
+	BlockToRun = FName{GET_MEMBER_NAME_ANSI_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, True)};
 #endif
 }
 
+#if WITH_EDITORONLY_DATA
 const TArray<FName>& FAlsRigVMFunction_IsGameWorld::GetControlFlowBlocks_Impl() const
 {
 	static const TArray<FName> Blocks{
-		FName{GET_MEMBER_NAME_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, True)},
-		FName{GET_MEMBER_NAME_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, False)},
+		FName{GET_MEMBER_NAME_ANSI_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, True)},
+		FName{GET_MEMBER_NAME_ANSI_STRING_VIEW_CHECKED(FAlsRigVMFunction_IsGameWorld, False)},
 		ForLoopCompletedPinName
 	};
 
 	return Blocks;
 }
+#endif

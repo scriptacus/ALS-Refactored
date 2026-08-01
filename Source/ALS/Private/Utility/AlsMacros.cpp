@@ -6,27 +6,35 @@
 #include "Containers/StaticArray.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/CoreDelegates.h"
 #include "Templates/Function.h"
 
 #if DO_ENSURE && !USING_CODE_ANALYSIS
 
 namespace AlsEnsure
 {
-	static bool CanExecute(std::atomic<bool>& bExecuted, const FAlsEnsureInfo& EnsureInfo)
+	static bool CanExecute(std::atomic<uint8>& bExecuted, const FAlsEnsureInfo& EnsureInfo)
 	{
+		static const auto* EnsureStateConsoleVariable{
+			IConsoleManager::Get().FindConsoleVariable(TEXT("core.EnsureState"))
+		};
+		check(EnsureStateConsoleVariable != nullptr)
+
 		static const auto* EnsureAlwaysEnabledConsoleVariable{
 			IConsoleManager::Get().FindConsoleVariable(TEXT("core.EnsureAlwaysEnabled"))
 		};
 		check(EnsureAlwaysEnabledConsoleVariable != nullptr)
 
-		if ((bExecuted.load(std::memory_order_relaxed) &&
+		const auto EnsureState{EnsureStateConsoleVariable->GetInt()};
+
+		if ((bExecuted.load(std::memory_order_relaxed) == EnsureState &&
 		     (!EnsureInfo.bEnsureAlways || !EnsureAlwaysEnabledConsoleVariable->GetBool())) ||
 		    !FPlatformMisc::IsEnsureAllowed())
 		{
 			return false;
 		}
 
-		return !bExecuted.exchange(true, std::memory_order_release) || EnsureInfo.bEnsureAlways;
+		return bExecuted.exchange(EnsureState, std::memory_order_release) != EnsureState || EnsureInfo.bEnsureAlways;
 	}
 
 	static bool ExecuteInternal(const FAlsEnsureInfo& EnsureInfo, const TCHAR* Message)
@@ -38,6 +46,14 @@ namespace AlsEnsure
 
 		if (FPlatformTime::GetSecondsPerCycle() != 0.0f)
 		{
+			TStringBuilder<512> EnsureBuilder{
+				InPlace, ANSITEXTVIEW("Ensure failed: "), EnsureInfo.Expression, ANSITEXTVIEW(", File: "),
+				EnsureInfo.FilePath ? EnsureInfo.FilePath : "Unknown", ANSITEXTVIEW(", Line: "), EnsureInfo.LineNumber, ANSITEXTVIEW(".")
+			};
+
+			FCoreDelegates::OnEnsureFailed.Broadcast(EnsureInfo.Expression, EnsureInfo.FilePath,
+			                                         EnsureInfo.LineNumber, Message, EnsureBuilder.ToString());
+
 			static const auto* EnsuresAreErrorsConsoleVariable{
 				IConsoleManager::Get().FindConsoleVariable(TEXT("core.EnsuresAreErrors"))
 			};
@@ -46,17 +62,13 @@ namespace AlsEnsure
 #if !NO_LOGGING
 			if (EnsuresAreErrorsConsoleVariable->GetBool())
 			{
-				UE_LOG(LogOutputDevice, Error, TEXT("Ensure failed: %hs, File: %hs, Line: %d."),
-				       EnsureInfo.Expression, EnsureInfo.FilePath, EnsureInfo.LineNumber)
-
-				UE_LOG(LogOutputDevice, Error, TEXT("%s"), Message)
+				UE_LOGF(LogOutputDevice, Error, "%ls", EnsureBuilder.ToString())
+				UE_LOGF(LogOutputDevice, Error, "%ls", Message)
 			}
 			else
 			{
-				UE_LOG(LogOutputDevice, Error, TEXT("Ensure failed: %hs, File: %hs, Line: %d."),
-				       EnsureInfo.Expression, EnsureInfo.FilePath, EnsureInfo.LineNumber)
-
-				UE_LOG(LogOutputDevice, Warning, TEXT("%s"), Message)
+				UE_LOGF(LogOutputDevice, Warning, "%ls", EnsureBuilder.ToString())
+				UE_LOGF(LogOutputDevice, Warning, "%ls", Message)
 			}
 #endif
 
@@ -69,19 +81,24 @@ namespace AlsEnsure
 			return false;
 		}
 
+		static const auto* EnsureBreakEnabledConsoleVariable{
+			IConsoleManager::Get().FindConsoleVariable(TEXT("core.EnsureBreakEnabled"))
+		};
+		check(EnsureBreakEnabledConsoleVariable != nullptr)
+
 #if UE_BUILD_SHIPPING
-		return true;
+		return EnsureBreakEnabledConsoleVariable->GetBool();
 #else
-		return !GIgnoreDebugger;
+		return !GIgnoreDebugger && EnsureBreakEnabledConsoleVariable->GetBool();
 #endif
 	}
 
-	bool UE_COLD UE_DEBUG_SECTION Execute(std::atomic<bool>& bExecuted, const FAlsEnsureInfo& EnsureInfo)
+	bool UE_COLD UE_DEBUG_SECTION Execute(std::atomic<uint8>& bExecuted, const FAlsEnsureInfo& EnsureInfo)
 	{
 		return CanExecute(bExecuted, EnsureInfo) && ExecuteInternal(EnsureInfo, TEXT(""));
 	}
 
-	bool UE_COLD UE_DEBUG_SECTION ExecuteFormat(std::atomic<bool>& bExecuted, const FAlsEnsureInfo& EnsureInfo,
+	bool UE_COLD UE_DEBUG_SECTION ExecuteFormat(std::atomic<uint8>& bExecuted, const FAlsEnsureInfo& EnsureInfo,
 	                                            const TCHAR* Format, ...)
 	{
 		if (!CanExecute(bExecuted, EnsureInfo))
@@ -90,7 +107,7 @@ namespace AlsEnsure
 		}
 
 		static UE::FWordMutex FormatMutex;
-		static constexpr auto MessageSize{65535};
+		static constexpr auto MessageSize{std::numeric_limits<uint16>::max()};
 		static TStaticArray<TCHAR, MessageSize> Message;
 
 		// ReSharper disable once CppLocalVariableWithNonTrivialDtorIsNeverUsed
